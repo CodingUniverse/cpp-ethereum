@@ -23,33 +23,38 @@ EVM::EVM(evm_instance* _instance) noexcept : m_instance(_instance)
 
 owning_bytes_ref EVMC::exec(u256& io_gas, ExtVMFace& _ext, OnOpFunc const& _onOp)
 {
-	bool rejected = false;
-	// TODO: Rejecting transactions with gas limit > 2^63 can be used by attacker to take JIT out of scope
-	rejected |= io_gas > std::numeric_limits<int64_t>::max(); // Do not accept requests with gas > 2^63 (int64 max)
-	rejected |= _ext.envInfo().number() > std::numeric_limits<int64_t>::max();
-	rejected |= _ext.envInfo().timestamp() > std::numeric_limits<int64_t>::max();
-	rejected |= _ext.envInfo().gasLimit() > std::numeric_limits<int64_t>::max();
-	if (rejected)
-	{
-		cwarn << "Execution rejected by EVM JIT (gas limit: " << io_gas << "), executing with interpreter";
-		return VMFactory::create(VMKind::Interpreter)->exec(io_gas, _ext, _onOp);
-	}
+    bool rejected = false;
+    // Do not accept requests with gas > 2^63 (int64 max)
+    rejected |= io_gas > std::numeric_limits<int64_t>::max();
+    rejected |= _ext.envInfo().number() > std::numeric_limits<int64_t>::max();
+    rejected |= _ext.envInfo().timestamp() > std::numeric_limits<int64_t>::max();
+    rejected |= _ext.envInfo().gasLimit() > std::numeric_limits<int64_t>::max();
 
-	auto gas = static_cast<int64_t>(io_gas);
-	auto r = execute(_ext, gas);
+    if (!rejected)
+    {
+        auto gas = static_cast<int64_t>(io_gas);
+        auto r = execute(_ext, gas);
 
-	// TODO: Add EVM-C result codes mapping with exception types.
-	if (r.status() == EVM_FAILURE)
-		BOOST_THROW_EXCEPTION(OutOfGas());
+        if (r.status() != EVM_REJECTED)
+        {
+            // TODO: Add EVM-C result codes mapping with exception types.
+            if (r.status() == EVM_FAILURE)
+                BOOST_THROW_EXCEPTION(OutOfGas());
 
-	io_gas = r.gasLeft();
-	// FIXME: Copy the output for now, but copyless version possible.
-	owning_bytes_ref output{r.output().toVector(), 0, r.output().size()};
+            io_gas = r.gasLeft();
 
-	if (r.status() == EVM_REVERT)
-		throw RevertInstruction(std::move(output));
+            // FIXME: Copy the output for now, but copyless version possible.
+            owning_bytes_ref output{r.output().toVector(), 0, r.output().size()};
 
-	return output;
+            if (r.status() == EVM_REVERT)
+                throw RevertInstruction(std::move(output));
+
+            return output;
+        }
+    }
+
+    cwarn << "Execution rejected by EVM-C, executing with interpreter";
+    return VMFactory::create(VMKind::Interpreter)->exec(io_gas, _ext, _onOp);
 }
 
 evm_revision toRevision(EVMSchedule const& _schedule)
